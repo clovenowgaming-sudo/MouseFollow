@@ -1,0 +1,3 @@
+<resources>
+    <string name="desc">Menampilkan lingkaran yang mengikuti pointer mouse dan meneruskan klik/scroll ke aplikasi di belakangnya.</string>
+</resources>
