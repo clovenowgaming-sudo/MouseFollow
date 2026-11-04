@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.GestureDescription;
 import android.content.Context;
 import android.content.Intent;
+import android.content.res.Configuration;
 import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.Path;
@@ -12,8 +13,10 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.DisplayMetrics;
+import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewConfiguration;
 import android.view.WindowManager;
 import android.view.accessibility.AccessibilityEvent;
 
@@ -23,8 +26,10 @@ public class FollowService extends AccessibilityService {
     Follower view;
     WindowManager.LayoutParams lp;
     Handler h = new Handler(Looper.getMainLooper());
-    boolean passing = false;
+    boolean passing = false, calib = false;
     Runnable doneRun = this::done;
+    float cx = -1, cy = -1;
+    int offX = 0, offY = 0, winSize = 0;
 
     @Override protected void onServiceConnected() {
         instance = this;
@@ -38,6 +43,12 @@ public class FollowService extends AccessibilityService {
         return super.onUnbind(i);
     }
 
+    @Override public void onConfigurationChanged(Configuration c) {
+        super.onConfigurationChanged(c);
+        calib = true;
+        if (view != null) moveTo(cx, cy);
+    }
+
     @Override public void onAccessibilityEvent(AccessibilityEvent e) {}
     @Override public void onInterrupt() {}
 
@@ -45,22 +56,36 @@ public class FollowService extends AccessibilityService {
 
     void apply() {
         boolean on = getSharedPreferences("p", 0).getBoolean("on", false);
-        if (on) add(); else remove();
+        remove();
+        if (on) add();
     }
 
     void add() {
-        if (view != null) { view.invalidate(); return; }
-        lp = new WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT,
+        DisplayMetrics m = getResources().getDisplayMetrics();
+        if (cx < 0) { cx = m.widthPixels / 2f; cy = m.heightPixels / 2f; }
+        int r = getSharedPreferences("p", 0).getInt("size", 24);
+        winSize = (int) ((2 * r + 48) * m.density);
+        lp = new WindowManager.LayoutParams(winSize, winSize,
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                 | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
                 | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT);
-        lp.gravity = android.view.Gravity.TOP | android.view.Gravity.START;
+        lp.gravity = Gravity.TOP | Gravity.START;
         if (Build.VERSION.SDK_INT >= 28)
             lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
-        view = new Follower(this);
+        lp.x = (int) (cx - winSize / 2f - offX);
+        lp.y = (int) (cy - winSize / 2f - offY);
+        view = new Follower(this, r * m.density);
+        calib = true;
+        view.addOnLayoutChangeListener((v, l, t, rr, b, ol, ot, or, ob) -> {
+            if (!calib) return;
+            calib = false;
+            int[] loc = new int[2];
+            v.getLocationOnScreen(loc);
+            int nx = loc[0] - lp.x, ny = loc[1] - lp.y;
+            if (nx != offX || ny != offY) { offX = nx; offY = ny; moveTo(cx, cy); }
+        });
         wm.addView(view, lp);
     }
 
@@ -73,6 +98,16 @@ public class FollowService extends AccessibilityService {
         }
     }
 
+    void moveTo(float x, float y) {
+        if (view == null) return;
+        DisplayMetrics m = getResources().getDisplayMetrics();
+        cx = Math.max(0, Math.min(m.widthPixels, x));
+        cy = Math.max(0, Math.min(m.heightPixels, y));
+        lp.x = (int) (cx - winSize / 2f - offX);
+        lp.y = (int) (cy - winSize / 2f - offY);
+        try { wm.updateViewLayout(view, lp); } catch (Exception ignored) {}
+    }
+
     void setTouchable(boolean t) {
         if (view == null) return;
         if (t) lp.flags &= ~WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
@@ -80,7 +115,6 @@ public class FollowService extends AccessibilityService {
         try { wm.updateViewLayout(view, lp); } catch (Exception ignored) {}
     }
 
-    // Teruskan gesture ke aplikasi di belakang overlay
     void pass(Path path, long dur) {
         if (passing || view == null) return;
         passing = true;
@@ -105,46 +139,48 @@ public class FollowService extends AccessibilityService {
     }
 
     class Follower extends View {
-        float x = -1000, y = -1000, x0, y0;
+        final float r;
+        final float slop;
+        float downX, downY, startCx, startCy;
         long t0;
-        boolean secondary;
+        boolean secondary, drag, mouse;
         Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-        int[] loc = new int[2];
 
-        Follower(Context c) { super(c); }
+        Follower(Context c, float radius) {
+            super(c);
+            r = radius;
+            slop = ViewConfiguration.get(c).getScaledTouchSlop();
+        }
 
         @Override protected void onDraw(Canvas c) {
-            getLocationOnScreen(loc);
             float d = getResources().getDisplayMetrics().density;
-            float r = getSharedPreferences("p", 0).getInt("size", 24) * d;
-            float cx = x - loc[0], cy = y - loc[1];
+            float x = getWidth() / 2f, y = getHeight() / 2f;
             p.setStyle(Paint.Style.FILL);
             p.setColor(0x552196F3);
-            c.drawCircle(cx, cy, r, p);
+            c.drawCircle(x, y, r, p);
             p.setStyle(Paint.Style.STROKE);
             p.setStrokeWidth(3 * d);
             p.setColor(0xFF2196F3);
-            c.drawCircle(cx, cy, r, p);
+            c.drawCircle(x, y, r, p);
+            p.setStyle(Paint.Style.FILL);
+            c.drawCircle(x, y, 3 * d, p);
         }
 
         @Override public boolean onGenericMotionEvent(MotionEvent e) {
             int a = e.getActionMasked();
             if (a == MotionEvent.ACTION_HOVER_MOVE || a == MotionEvent.ACTION_HOVER_ENTER) {
-                x = e.getRawX(); y = e.getRawY();
-                invalidate();
+                moveTo(e.getRawX(), e.getRawY());
                 return true;
             }
             if (a == MotionEvent.ACTION_SCROLL) {
-                x = e.getRawX(); y = e.getRawY();
-                invalidate();
+                moveTo(e.getRawX(), e.getRawY());
                 float v = e.getAxisValue(MotionEvent.AXIS_VSCROLL);
                 float hs = e.getAxisValue(MotionEvent.AXIS_HSCROLL);
                 DisplayMetrics m = getResources().getDisplayMetrics();
                 Path path = new Path();
-                path.moveTo(x, y);
-                float ex = Math.max(0, Math.min(m.widthPixels, x - hs * 250));
-                float ey = Math.max(0, Math.min(m.heightPixels, y + v * 250));
-                path.lineTo(ex, ey);
+                path.moveTo(cx, cy);
+                path.lineTo(Math.max(0, Math.min(m.widthPixels, cx - hs * 250)),
+                            Math.max(0, Math.min(m.heightPixels, cy + v * 250)));
                 pass(path, 150);
                 return true;
             }
@@ -152,25 +188,38 @@ public class FollowService extends AccessibilityService {
         }
 
         @Override public boolean onTouchEvent(MotionEvent e) {
-            x = e.getRawX(); y = e.getRawY();
             switch (e.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN:
-                    x0 = x; y0 = y; t0 = e.getEventTime();
+                    mouse = e.getToolType(0) == MotionEvent.TOOL_TYPE_MOUSE;
+                    downX = e.getRawX(); downY = e.getRawY();
+                    startCx = cx; startCy = cy;
+                    t0 = e.getEventTime();
+                    drag = false;
                     secondary = (e.getButtonState() & MotionEvent.BUTTON_SECONDARY) != 0;
-                    invalidate();
                     return true;
                 case MotionEvent.ACTION_MOVE:
-                    invalidate();
+                    if (mouse) {
+                        moveTo(e.getRawX(), e.getRawY());
+                    } else {
+                        float dx = e.getRawX() - downX, dy = e.getRawY() - downY;
+                        if (!drag && Math.hypot(dx, dy) > slop) drag = true;
+                        if (drag) moveTo(startCx + dx, startCy + dy);
+                    }
                     return true;
                 case MotionEvent.ACTION_UP:
-                    invalidate();
-                    if (secondary) { performGlobalAction(GLOBAL_ACTION_BACK); return true; }
-                    Path path = new Path();
-                    path.moveTo(x0, y0);
-                    float dist = (float) Math.hypot(x - x0, y - y0);
-                    if (dist > 20) path.lineTo(x, y);
                     long dur = Math.max(50, Math.min(5000, e.getEventTime() - t0));
-                    pass(path, dur);
+                    if (mouse) {
+                        if (secondary) { performGlobalAction(GLOBAL_ACTION_BACK); return true; }
+                        Path path = new Path();
+                        path.moveTo(downX, downY);
+                        if (Math.hypot(e.getRawX() - downX, e.getRawY() - downY) > 20)
+                            path.lineTo(e.getRawX(), e.getRawY());
+                        pass(path, dur);
+                    } else if (!drag) {
+                        Path path = new Path();
+                        path.moveTo(cx, cy);
+                        pass(path, dur);
+                    }
                     return true;
             }
             return true;
