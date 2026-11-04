@@ -1,6 +1,7 @@
 package com.vinz.mousefollow;
 
 import android.accessibilityservice.AccessibilityService;
+import android.accessibilityservice.AccessibilityServiceInfo;
 import android.accessibilityservice.GestureDescription;
 import android.content.Context;
 import android.content.Intent;
@@ -14,6 +15,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.util.DisplayMetrics;
 import android.view.Gravity;
+import android.view.InputDevice;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewConfiguration;
@@ -24,6 +26,7 @@ public class FollowService extends AccessibilityService {
     static FollowService instance;
     WindowManager wm;
     Follower view;
+    TouchView tv;
     WindowManager.LayoutParams lp;
     Handler h = new Handler(Looper.getMainLooper());
     boolean passing = false, calib = false;
@@ -34,6 +37,13 @@ public class FollowService extends AccessibilityService {
     @Override protected void onServiceConnected() {
         instance = this;
         wm = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
+        if (Build.VERSION.SDK_INT >= 34) {
+            AccessibilityServiceInfo i = getServiceInfo();
+            if (i != null) {
+                i.setMotionEventSources(InputDevice.SOURCE_TOUCHSCREEN);
+                setServiceInfo(i);
+            }
+        }
         apply();
     }
 
@@ -52,12 +62,45 @@ public class FollowService extends AccessibilityService {
     @Override public void onAccessibilityEvent(AccessibilityEvent e) {}
     @Override public void onInterrupt() {}
 
+    // Android 14+: terima sentuhan layar tanpa memblokirnya
+    @Override public void onMotionEvent(MotionEvent e) {
+        if (tv == null) return;
+        int a = e.getActionMasked();
+        if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) { tv.set(null, null, 0); return; }
+        int skip = (a == MotionEvent.ACTION_POINTER_UP) ? e.getActionIndex() : -1;
+        float[] xs = new float[5], ys = new float[5];
+        int n = 0;
+        for (int i = 0; i < e.getPointerCount() && n < 5; i++) {
+            if (i == skip) continue;
+            xs[n] = e.getRawX(i);
+            ys[n] = e.getRawY(i);
+            n++;
+        }
+        tv.set(xs, ys, n);
+    }
+
     static void refresh() { if (instance != null) instance.apply(); }
 
     void apply() {
-        boolean on = getSharedPreferences("p", 0).getBoolean("on", false);
         remove();
-        if (on) add();
+        if (getSharedPreferences("p", 0).getBoolean("on", false)) add();
+        if (getSharedPreferences("p", 0).getBoolean("touch", false)) addTouch();
+    }
+
+    void addTouch() {
+        WindowManager.LayoutParams t = new WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT);
+        t.gravity = Gravity.TOP | Gravity.START;
+        if (Build.VERSION.SDK_INT >= 28)
+            t.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+        tv = new TouchView(this);
+        wm.addView(tv, t);
     }
 
     void add() {
@@ -95,6 +138,10 @@ public class FollowService extends AccessibilityService {
         if (view != null) {
             try { wm.removeView(view); } catch (Exception ignored) {}
             view = null;
+        }
+        if (tv != null) {
+            try { wm.removeView(tv); } catch (Exception ignored) {}
+            tv = null;
         }
     }
 
@@ -136,6 +183,39 @@ public class FollowService extends AccessibilityService {
         if (!passing) return;
         passing = false;
         setTouchable(true);
+    }
+
+    // Lingkaran di tiap jari (maks 5), tidak memblokir sentuhan
+    class TouchView extends View {
+        float[] xs = new float[5], ys = new float[5];
+        int n = 0;
+        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        int[] loc = new int[2];
+
+        TouchView(Context c) { super(c); }
+
+        void set(float[] x, float[] y, int count) {
+            if (x != null) { xs = x; ys = y; }
+            n = count;
+            postInvalidateOnAnimation();
+        }
+
+        @Override protected void onDraw(Canvas c) {
+            if (n == 0) return;
+            getLocationOnScreen(loc);
+            float d = getResources().getDisplayMetrics().density;
+            float r = getSharedPreferences("p", 0).getInt("size", 24) * d;
+            for (int i = 0; i < n; i++) {
+                float x = xs[i] - loc[0], y = ys[i] - loc[1];
+                p.setStyle(Paint.Style.FILL);
+                p.setColor(0x55FF9800);
+                c.drawCircle(x, y, r, p);
+                p.setStyle(Paint.Style.STROKE);
+                p.setStrokeWidth(3 * d);
+                p.setColor(0xFFFF9800);
+                c.drawCircle(x, y, r, p);
+            }
+        }
     }
 
     class Follower extends View {
